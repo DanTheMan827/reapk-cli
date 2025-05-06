@@ -11,3 +11,6 @@ target/
 
 # Ignore any testing apks
 *.apk
+
+# Ignore apktool jar file
+apktool.jar
