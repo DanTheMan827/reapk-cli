@@ -1,0 +1,105 @@
+name: "Build"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '*'
+
+jobs:
+  build:
+    name: "Build for ${{ matrix.os }} ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            arch: i686-pc-windows-msvc
+            artifact_name: "reapk-cli-windows-x86"
+            binary_extension: ".exe"
+
+          - os: windows-latest
+            arch: x86_64-pc-windows-msvc
+            artifact_name: "reapk-cli-windows-x64"
+            binary_extension: ".exe"
+
+          - os: ubuntu-latest
+            arch: x86_64-unknown-linux-gnu
+            artifact_name: "reapk-cli-linux-x64"
+
+          - os: macos-13
+            arch: x86_64-apple-darwin
+            artifact_name: "reapk-cli-macos-intel"
+
+          - os: macos-13
+            arch: aarch64-apple-darwin
+            artifact_name: "reapk-cli-macos-arm"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/
+            target/
+          key: ${{ matrix.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-${{ matrix.arch }}-cargo-
+
+      - name: Install Rust toolchain
+        run: rustup target add ${{ matrix.arch }}
+
+      - name: Build (Release)
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.arch }}
+
+      - name: Upload artifact (Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-release
+          path: target/${{ matrix.arch }}/release/reapk-cli${{ matrix.binary_extension }}
+
+      - name: Build (Debug)
+        shell: bash
+        run: |
+          cargo build --target ${{ matrix.arch }}
+
+      - name: Upload artifact (Debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-debug
+          path: target/${{ matrix.arch }}/debug/reapk-cli${{ matrix.binary_extension }}
+
+  lipo:
+    name: "Create macOS universal binary"
+    runs-on: macos-13
+    needs: build
+    strategy:
+      matrix:
+        build_type: [ "release", "debug"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: target/
+
+      - name: Create universal binary
+        run: |
+            mkdir -p "macos-universal"
+            lipo -create -output macos-universal/reapk-cli \
+                target/reapk-cli-macos-intel-${{ matrix.build_type }}/reapk-cli \
+                target/reapk-cli-macos-arm-${{ matrix.build_type }}/reapk-cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reapk-cli-macos-universal-${{ matrix.build_type }}
+          path: macos-universal/reapk-cli

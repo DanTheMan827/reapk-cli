@@ -1,0 +1,12 @@
+[package]
+name = "reapk-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.37", features = ["derive"] }
+uuid = { version = "1.16.0", features = ["v7"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["consoleapi", "fileapi", "winbase", "processenv"] }
+winreg = "0.55.0"
