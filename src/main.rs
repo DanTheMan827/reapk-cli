@@ -1,9 +1,8 @@
-mod scope_guard;
 mod utils;
 
-use std::path::PathBuf;
 use clap::Parser;
-use scope_guard::ScopeGuard;
+use defer_lite::defer;
+use std::path::PathBuf;
 use utils::*;
 
 #[derive(Parser, Debug)]
@@ -16,11 +15,19 @@ struct Args {
     /// The APK file to be generated.  If not provided, the input APK file will be used.
     #[arg(index = 2)]
     output_apk: Option<PathBuf>,
+
+    /// The certificate file to use for signing the APK.  
+    #[clap(long = "cert", requires = "key")]
+    cert: Option<PathBuf>,
+
+    /// The key file to use for signing the APK
+    #[clap(long = "key", requires = "cert")]
+    key: Option<PathBuf>,
 }
 
 fn main() {
     // Parse command line arguments
-    let (input_apk, output_apk) = {
+    let (input_apk, output_apk, cert, key) = {
         let args = Args::parse();
         let input_apk = args.input_apk;
 
@@ -33,11 +40,11 @@ fn main() {
         // Check if the output APK argument is provided
         if let Some(output_apk) = args.output_apk {
             // Return the input APK and output APK paths
-            (input_apk, output_apk)
+            (input_apk, output_apk, args.cert, args.key)
         } else {
             // The output APK is not provided, so we will just use the input APK path
             // as the output APK path
-            (input_apk.clone(), input_apk.clone())
+            (input_apk.clone(), input_apk.clone(), args.cert, args.key)
         }
     };
 
@@ -49,15 +56,15 @@ fn main() {
 
     // Create a temporary directory
     let temp_dir = make_temp_dir().expect("Failed to create temporary directory");
-    let _temp_dir_guard = ScopeGuard::new(|| {
+    defer! {
         // Clean up the temporary directory when the scope ends
         println!("I: Cleaning up temporary directory...");
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temporary directory");
-    });
+    }
 
     // Define the paths for the temporary files
-    let cert_path = &temp_dir.join("debug_cert.crt");
-    let key_path = &temp_dir.join("debug_key.pk8");
+    let cert_path = &cert.clone().unwrap_or(temp_dir.join("debug_cert.crt"));
+    let key_path = &key.clone().unwrap_or(temp_dir.join("debug_key.pk8"));
     let apk_signer_path = &temp_dir.join("apksigner.jar");
     let apk_tool_path = &temp_dir.join("apktool.jar");
     let unpacked_path = &temp_dir.join("unpacked");
@@ -72,7 +79,7 @@ fn main() {
     // Scope that deals with unpacking and packing the APK
     {
         // Create a scope guard to clean up temporary files when the scope ends
-        let _cleanup = ScopeGuard::new(|| {
+        defer! {
             // Remove apktool if it exists
             if apk_tool_path.exists() {
                 println!("I: Removing {}...", apk_tool_path.to_string_lossy());
@@ -84,20 +91,30 @@ fn main() {
                 println!("I: Removing {}...", unpacked_path.to_string_lossy());
                 std::fs::remove_dir_all(unpacked_path).expect("Failed to remove unpacked APK directory");
             }
-        });
+        }
 
         // Write apktool to the temporary directory
-        println!("I: Writing APK tool to {}...", apk_tool_path.to_string_lossy());
+        println!(
+            "I: Writing APK tool to {}...",
+            apk_tool_path.to_string_lossy()
+        );
         std::fs::write(apk_tool_path, apk_tool).expect("Failed to write APK tool");
 
         // Unpack the APK using apktool
-        println!("I: Unpacking input APK file to {}...", &unpacked_path.to_string_lossy());
-        let _ = run_java_jar(apk_tool_path.to_string_lossy().as_ref(), &[
-            "d",
-            input_apk.to_string_lossy().as_ref(),
-            "-o",
-            unpacked_path.to_string_lossy().as_ref(),
-        ]).expect("Failed to unpack APK");
+        println!(
+            "I: Unpacking input APK file to {}...",
+            &unpacked_path.to_string_lossy()
+        );
+        let _ = run_java_jar(
+            apk_tool_path.to_string_lossy().as_ref(),
+            &[
+                "d",
+                input_apk.to_string_lossy().as_ref(),
+                "-o",
+                unpacked_path.to_string_lossy().as_ref(),
+            ],
+        )
+        .expect("Failed to unpack APK");
 
         // Open the temporary directory
         println!("I: Opening unpacked APK directory...");
@@ -107,23 +124,32 @@ fn main() {
         println!("I: Press Enter to continue...");
         {
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input).expect("Failed to read line");
+            std::io::stdin()
+                .read_line(&mut input)
+                .expect("Failed to read line");
         }
 
         // Pack the APK using apktool
-        println!("I: Packing APK file to {}...", intermediate_apk_path.to_string_lossy());
-        let _ = run_java_jar(apk_tool_path.to_string_lossy().as_ref(), &[
-            "b",
-            unpacked_path.to_string_lossy().as_ref(),
-            "-o",
-            intermediate_apk_path.to_string_lossy().as_ref(),
-        ]).expect("Failed to pack APK");
+        println!(
+            "I: Packing APK file to {}...",
+            intermediate_apk_path.to_string_lossy()
+        );
+        let _ = run_java_jar(
+            apk_tool_path.to_string_lossy().as_ref(),
+            &[
+                "b",
+                unpacked_path.to_string_lossy().as_ref(),
+                "-o",
+                intermediate_apk_path.to_string_lossy().as_ref(),
+            ],
+        )
+        .expect("Failed to pack APK");
     }
 
     // Scope that deals with signing the APK
     {
         // Create a scope guard to clean up temporary files when the scope ends
-        let _cleanup = ScopeGuard::new(|| {
+        defer! {
             // Remove apksigner if it exists
             if apk_signer_path.exists() {
                 println!("I: Removing {}...", apk_signer_path.to_string_lossy());
@@ -131,41 +157,66 @@ fn main() {
             }
 
             // Remove debug cert if it exists
-            if cert_path.exists() {
+            if cert.is_none() && cert_path.exists() {
                 println!("I: Removing {}...", cert_path.to_string_lossy());
                 std::fs::remove_file(cert_path).expect("Failed to remove debug cert");
             }
 
             // Remove debug key if it exists
-            if key_path.exists() {
+            if key.is_none() && key_path.exists() {
                 println!("I: Removing {}...", key_path.to_string_lossy());
                 std::fs::remove_file(key_path).expect("Failed to remove debug key");
             }
-        });
+        }
 
-        println!("I: Writing debug certificate to {}...", cert_path.to_string_lossy());
-        std::fs::write(cert_path, debug_cert).expect("Failed to write debug cert");
+        println!(
+            "I: Writing APK signer to {}...",
+            apk_signer_path.to_string_lossy()
+        );
+        
+        if cert.is_none() {
+            println!(
+                "I: Writing debug certificate to {}...",
+                cert_path.to_string_lossy()
+            );
+            std::fs::write(cert_path, debug_cert).expect("Failed to write debug cert");
+        }
 
-        println!("I: Writing debug key to {}...", key_path.to_string_lossy());
-        std::fs::write(key_path, debug_key).expect("Failed to write debug key");
-
-        println!("I: Writing APK signer to {}...", apk_signer_path.to_string_lossy());
+        if key.is_none() {
+            println!("I: Writing debug key to {}...", key_path.to_string_lossy());
+            std::fs::write(key_path, debug_key).expect("Failed to write debug key");
+        }
+        
         std::fs::write(apk_signer_path, apk_signer).expect("Failed to write APK signer");
+        
+        assert!(cert_path.exists(), "Certificate file does not exist");
+        assert!(key_path.exists(), "Key file does not exist");
+        assert!(apk_signer_path.exists(), "APK signer file does not exist");
 
         // Sign the APK using apksigner
-        println!("I: Signing APK file {}...", intermediate_apk_path.to_string_lossy());
-        let _ = run_java_jar(apk_signer_path.to_string_lossy().as_ref(), &[
-            "sign",
-            "--key",
-            key_path.to_string_lossy().as_ref(),
-            "--cert",
-            cert_path.to_string_lossy().as_ref(),
-            intermediate_apk_path.to_string_lossy().as_ref()
-        ]).expect("Failed to unpack APK");
+        println!(
+            "I: Signing APK file {}...",
+            intermediate_apk_path.to_string_lossy()
+        );
+        let _ = run_java_jar(
+            apk_signer_path.to_string_lossy().as_ref(),
+            &[
+                "sign",
+                "--key",
+                key_path.to_string_lossy().as_ref(),
+                "--cert",
+                cert_path.to_string_lossy().as_ref(),
+                intermediate_apk_path.to_string_lossy().as_ref(),
+            ],
+        )
+        .expect("Failed to unpack APK");
     }
 
     // Copy the signed APK to the output path replacing any existing file
-    println!("I: Copying signed APK to {}...", output_apk.to_string_lossy());
+    println!(
+        "I: Copying signed APK to {}...",
+        output_apk.to_string_lossy()
+    );
     std::fs::copy(intermediate_apk_path, output_apk)
         .expect("Failed to move signed APK to output path");
 }
